@@ -1,0 +1,109 @@
+version: "3.9"
+
+name: fraud-system
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.3.5
+    container_name: fraud-redpanda
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - "1G"
+      - --reserve-memory
+      - "0M"
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"
+      - "9644:9644"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info --brokers redpanda:9092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  postgres:
+    image: postgres:16.4
+    container_name: fraud-postgres
+    environment:
+      POSTGRES_USER: fraud
+      POSTGRES_PASSWORD: fraud
+      POSTGRES_DB: fraud_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ../db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fraud -d fraud_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  topic-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.3.5
+    container_name: fraud-topic-init
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/scripts:ro
+    entrypoint: ["bash", "-lc", "/scripts/create-topics.sh"]
+    restart: "no"
+
+  producer:
+    build:
+      context: ../services/producer
+    container_name: fraud-producer
+    depends_on:
+      topic-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKERS: "redpanda:9092"
+      KAFKA_TOPIC: "transactions"
+      RATE_PER_SEC: "10"
+      USERS: "2000"
+      MERCHANTS: "250"
+      CARDS_PER_USER: "2"
+      RANDOM_SEED: "42"
+      LOG_LEVEL: "INFO"
+    restart: unless-stopped
+
+  stream-consumer:
+    build:
+      context: ../services/stream_consumer
+    container_name: fraud-stream-consumer
+    depends_on:
+      postgres:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKERS: "redpanda:9092"
+      KAFKA_TOPIC: "transactions"
+      KAFKA_GROUP_ID: "raw-events-writer"
+      AUTO_OFFSET_RESET: "earliest"
+
+      PGHOST: "postgres"
+      PGPORT: "5432"
+      PGDATABASE: "fraud_db"
+      PGUSER: "fraud"
+      PGPASSWORD: "fraud"
+
+      LOG_LEVEL: "INFO"
+      BATCH_COMMIT_EVERY_N: "50"
+    restart: unless-stopped
+
+volumes:
+  redpanda-data:
+  pg-data:
