@@ -8,3 +8,39 @@ venv/
 reports/*
 !reports/.gitkeep
 .venv
+
+#Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker volumes (data)
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Reports (generated)
+reports/*.html
+reports/*.json
+!reports/.gitkeep
+
+# Logs
+*.log
+
+# Byte-compiled
+*.pyc
+
+.vscode/
+settings.json

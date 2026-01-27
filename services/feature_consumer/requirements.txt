@@ -1,0 +1,5 @@
+# Kafka client
+kafka-python==2.3.0
+
+# PostgreSQL driver
+psycopg2-binary==2.9.11

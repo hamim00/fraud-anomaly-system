@@ -119,7 +119,7 @@ def main() -> None:
         except Exception:
             pass
         try:
-            consumer.close(timeout=10)
+            consumer.close()
         except Exception:
             pass
         try:
