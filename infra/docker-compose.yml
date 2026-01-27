@@ -25,10 +25,11 @@ services:
     volumes:
       - redpanda-data:/var/lib/redpanda/data
     healthcheck:
-      test: ["CMD-SHELL", "rpk cluster info --brokers redpanda:9092 > /dev/null 2>&1"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   postgres:
     image: postgres:16.4
@@ -130,6 +131,63 @@ services:
       COMMIT_EVERY_N: "50"
     restart: unless-stopped
 
+  # ==========================================================================
+  # MLFLOW - Experiment tracking and model registry (Milestone 3)
+  # ==========================================================================
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.21.3
+    container_name: fraud-mlflow
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-data:/mlflow
+    environment:
+      MLFLOW_BACKEND_STORE_URI: "sqlite:///mlflow/mlflow.db"
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: "/mlflow/artifacts"
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:///mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================================
+  # TRAINER - Model training service (Milestone 3)
+  # ==========================================================================
+  # This is a ONE-OFF service, not continuously running.
+  # Run manually with: docker compose run trainer
+  # ==========================================================================
+  trainer:
+    build:
+      context: ../services/trainer
+    container_name: fraud-trainer
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    environment:
+      PGHOST: "postgres"
+      PGPORT: "5432"
+      PGDATABASE: "fraud_db"
+      PGUSER: "fraud"
+      PGPASSWORD: "fraud"
+      
+      MLFLOW_TRACKING_URI: "http://mlflow:5000"
+      MLFLOW_EXPERIMENT: "fraud-detection"
+      
+      # Promotion thresholds
+      MIN_PR_AUC: "0.15"
+      MIN_RECALL: "0.30"
+    profiles:
+      - training  # Only runs when explicitly requested
+
 volumes:
   redpanda-data:
   pg-data:
+  mlflow-data:
