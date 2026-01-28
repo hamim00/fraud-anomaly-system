@@ -1,9 +1,21 @@
+# =============================================================================
 # Prometheus Configuration for Fraud Detection System
+# =============================================================================
+# Updated for Milestone 6 - includes drift-detector
+#
+# This file configures Prometheus to scrape metrics from all services:
+# - Producer (port 9091)
+# - Stream Consumer (port 9092)
+# - Feature Consumer (port 9093)
+# - Model Service (port 8000)
+# - Drift Detector (port 9094)
+# - PostgreSQL via exporter (port 9187)
+# - Redpanda (port 9644)
 # =============================================================================
 
 global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+  scrape_interval: 15s        # How often to scrape targets
+  evaluation_interval: 15s    # How often to evaluate rules
   external_labels:
     monitor: 'fraud-detection-monitor'
 
@@ -14,44 +26,76 @@ alerting:
 # Rule files (can add alert rules later)
 rule_files: []
 
-# Scrape configurations
+# =============================================================================
+# SCRAPE CONFIGURATIONS
+# =============================================================================
 scrape_configs:
+
+  # ---------------------------------------------------------------------------
   # Prometheus self-monitoring
+  # ---------------------------------------------------------------------------
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
 
-  # Model Service - FastAPI scoring API
+  # ---------------------------------------------------------------------------
+  # Model Service - FastAPI scoring API (Milestone 4)
+  # Metrics: fraud_scoring_*, fraud_model_*, fraud_alerts_*
+  # ---------------------------------------------------------------------------
   - job_name: 'model-service'
     static_configs:
       - targets: ['model-service:8000']
     metrics_path: /metrics
 
-  # Producer - Transaction generator
+  # ---------------------------------------------------------------------------
+  # Producer - Transaction generator (Milestone 5)
+  # Metrics: fraud_transactions_produced_*, fraud_producer_*
+  # ---------------------------------------------------------------------------
   - job_name: 'producer'
     static_configs:
       - targets: ['producer:9091']
     metrics_path: /metrics
 
-  # Stream Consumer - Raw events writer
+  # ---------------------------------------------------------------------------
+  # Stream Consumer - Raw events writer (Milestone 5)
+  # Metrics: fraud_stream_consumer_*, fraud_consumer_lag
+  # ---------------------------------------------------------------------------
   - job_name: 'stream-consumer'
     static_configs:
       - targets: ['stream-consumer:9092']
     metrics_path: /metrics
 
-  # Feature Consumer - Feature calculator
+  # ---------------------------------------------------------------------------
+  # Feature Consumer - Feature calculator (Milestone 5)
+  # Metrics: fraud_feature_consumer_*, fraud_feature_calculation_*
+  # ---------------------------------------------------------------------------
   - job_name: 'feature-consumer'
     static_configs:
       - targets: ['feature-consumer:9093']
     metrics_path: /metrics
 
-  # PostgreSQL metrics via postgres-exporter
+  # ---------------------------------------------------------------------------
+  # PostgreSQL metrics via postgres-exporter (Milestone 5)
+  # Metrics: pg_stat_*, pg_database_*, pg_settings_*
+  # ---------------------------------------------------------------------------
   - job_name: 'postgres'
     static_configs:
       - targets: ['postgres-exporter:9187']
 
+  # ---------------------------------------------------------------------------
   # Redpanda/Kafka metrics (built-in)
+  # Metrics: redpanda_*, vectorized_*
+  # ---------------------------------------------------------------------------
   - job_name: 'redpanda'
     static_configs:
       - targets: ['redpanda:9644']
     metrics_path: /public_metrics
+
+  # ---------------------------------------------------------------------------
+  # Drift Detector - Data drift monitoring (Milestone 6)
+  # Metrics: fraud_drift_*, fraud_feature_drift_*, fraud_feature_mean
+  # ---------------------------------------------------------------------------
+  - job_name: 'drift-detector'
+    static_configs:
+      - targets: ['drift-detector:9094']
+    metrics_path: /metrics

@@ -318,6 +318,46 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ==========================================================================
+  # DRIFT-DETECTOR - Data drift monitoring (Milestone 6)
+  # ==========================================================================
+  drift-detector:
+    build:
+      context: ../services/drift_detector
+    container_name: fraud-drift-detector
+    ports:
+      - "8001:8001"   # API
+      - "9094:9094"   # Prometheus metrics
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Database connection
+      PGHOST: "postgres"
+      PGPORT: "5432"
+      PGDATABASE: "fraud_db"
+      PGUSER: "fraud"
+      PGPASSWORD: "fraud"
+      
+      # Drift detection settings
+      DRIFT_CHECK_INTERVAL: "5"          # Check every 5 minutes
+      DRIFT_MIN_SAMPLES: "100"           # Minimum samples needed
+      DRIFT_REFERENCE_SIZE: "5000"       # Reference window size
+      DRIFT_CURRENT_SIZE: "1000"         # Current window size
+      DRIFT_THRESHOLD: "0.05"            # p-value threshold
+      
+      # Server settings
+      API_PORT: "8001"
+      METRICS_PORT: "9094"
+      LOG_LEVEL: "INFO"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
 volumes:
   redpanda-data:
   pg-data:
