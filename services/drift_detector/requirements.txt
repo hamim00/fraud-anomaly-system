@@ -1,0 +1,22 @@
+# Drift Detection
+evidently==0.4.33
+
+# Database
+psycopg2-binary==2.9.11
+
+# Data processing
+pandas==2.2.3
+numpy==2.2.3
+
+# Web API
+fastapi==0.115.0
+uvicorn==0.32.0
+
+# Monitoring
+prometheus-client==0.20.0
+
+# Scheduling
+apscheduler==3.10.4
+
+# Utilities
+python-dateutil==2.9.0
