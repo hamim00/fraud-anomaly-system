@@ -1,16 +1,61 @@
+"""
+STREAM CONSUMER - Raw Events Writer with Prometheus Metrics
+============================================================
+
+Consumes transactions from Kafka and writes to PostgreSQL raw_events table.
+Exposes metrics on port 9092 for Prometheus scraping.
+"""
+
 import json
 import logging
 import os
 import signal
 import sys
+import time
 from datetime import datetime
 from typing import Any, Dict
+from threading import Thread
 
 import psycopg2
 import psycopg2.extras
 from kafka import KafkaConsumer
+from prometheus_client import Counter, Histogram, Gauge, start_http_server
 
 from db import connect_with_retry, insert_raw_event
+
+
+# ============================================================================
+# PROMETHEUS METRICS
+# ============================================================================
+
+MESSAGES_PROCESSED = Counter(
+    'fraud_stream_consumer_messages_total',
+    'Total messages processed by stream consumer',
+    ['status']
+)
+
+CONSUMER_LAG = Gauge(
+    'fraud_consumer_lag',
+    'Consumer lag (messages behind)',
+    ['consumer_group', 'partition']
+)
+
+PROCESSING_TIME = Histogram(
+    'fraud_stream_consumer_processing_seconds',
+    'Time to process a single message',
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
+)
+
+DB_WRITE_LATENCY = Histogram(
+    'fraud_stream_consumer_db_write_seconds',
+    'Database write latency for raw_events',
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
+)
+
+BATCH_SIZE = Gauge(
+    'fraud_stream_consumer_batch_size',
+    'Current batch size before commit'
+)
 
 
 def setup_logger(level: str) -> None:
@@ -62,6 +107,11 @@ def main() -> None:
     setup_logger(os.getenv("LOG_LEVEL", "INFO"))
     log = logging.getLogger("stream_consumer")
 
+    # Start Prometheus metrics server
+    metrics_port = int(os.getenv("METRICS_PORT", "9092"))
+    log.info(f"Starting metrics server on port {metrics_port}")
+    start_http_server(metrics_port)
+
     kafka_brokers = os.getenv("KAFKA_BROKERS", "redpanda:9092")
     topic = os.getenv("KAFKA_TOPIC", "transactions")
     group_id = os.getenv("KAFKA_GROUP_ID", "raw-events-writer")
@@ -88,25 +138,54 @@ def main() -> None:
 
     killer = GracefulKiller()
     processed = 0
+    batch_count = 0
 
     try:
         while not killer.stop:
             for msg in consumer:
+                process_start = time.time()
                 event = msg.value
                 row = build_row(msg, event)
 
                 try:
+                    db_start = time.time()
                     insert_raw_event(conn, row)
                     conn.commit()
+                    DB_WRITE_LATENCY.observe(time.time() - db_start)
+                    
+                    MESSAGES_PROCESSED.labels(status='success').inc()
                 except Exception as e:
                     conn.rollback()
+                    MESSAGES_PROCESSED.labels(status='error').inc()
                     log.exception("DB insert failed (will NOT commit Kafka offset). Error=%s", e)
                     break
 
                 processed += 1
+                batch_count += 1
+                
+                # Record processing time
+                PROCESSING_TIME.observe(time.time() - process_start)
+                BATCH_SIZE.set(batch_count)
 
                 if processed % batch_commit_every_n == 0:
                     consumer.commit()
+                    batch_count = 0
+                    BATCH_SIZE.set(0)
+                    
+                    # Update lag metrics
+                    try:
+                        partitions = consumer.assignment()
+                        for tp in partitions:
+                            end_offsets = consumer.end_offsets([tp])
+                            current_offset = consumer.position(tp)
+                            lag = end_offsets[tp] - current_offset
+                            CONSUMER_LAG.labels(
+                                consumer_group=group_id,
+                                partition=str(tp.partition)
+                            ).set(lag)
+                    except Exception:
+                        pass
+                    
                     log.info(
                         "Processed=%d committed_offsets (latest: partition=%s offset=%s txn_id=%s label=%s amount=%s)",
                         processed, msg.partition, msg.offset, event.get("transaction_id"), event.get("label"), event.get("amount")

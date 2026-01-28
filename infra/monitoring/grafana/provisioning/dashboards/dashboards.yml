@@ -1,0 +1,16 @@
+# Grafana Dashboard Provisioning
+# Auto-loads dashboards from /var/lib/grafana/dashboards on startup
+
+apiVersion: 1
+
+providers:
+  - name: 'Fraud Detection System'
+    orgId: 1
+    folder: 'Fraud Detection'
+    folderUid: 'fraud-detection'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

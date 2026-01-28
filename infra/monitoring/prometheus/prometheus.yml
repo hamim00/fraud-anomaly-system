@@ -1,0 +1,57 @@
+# Prometheus Configuration for Fraud Detection System
+# =============================================================================
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'fraud-detection-monitor'
+
+# Alerting configuration (can add alertmanager later)
+alerting:
+  alertmanagers: []
+
+# Rule files (can add alert rules later)
+rule_files: []
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Model Service - FastAPI scoring API
+  - job_name: 'model-service'
+    static_configs:
+      - targets: ['model-service:8000']
+    metrics_path: /metrics
+
+  # Producer - Transaction generator
+  - job_name: 'producer'
+    static_configs:
+      - targets: ['producer:9091']
+    metrics_path: /metrics
+
+  # Stream Consumer - Raw events writer
+  - job_name: 'stream-consumer'
+    static_configs:
+      - targets: ['stream-consumer:9092']
+    metrics_path: /metrics
+
+  # Feature Consumer - Feature calculator
+  - job_name: 'feature-consumer'
+    static_configs:
+      - targets: ['feature-consumer:9093']
+    metrics_path: /metrics
+
+  # PostgreSQL metrics via postgres-exporter
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+
+  # Redpanda/Kafka metrics (built-in)
+  - job_name: 'redpanda'
+    static_configs:
+      - targets: ['redpanda:9644']
+    metrics_path: /public_metrics

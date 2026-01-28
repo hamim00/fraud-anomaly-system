@@ -1,11 +1,12 @@
 """
-FEATURE CONSUMER - Main Application
+FEATURE CONSUMER - Main Application with Prometheus Metrics
 ================================================================================
 
 This service does the following:
 1. Reads transactions from Kafka (same topic as raw events)
 2. For each transaction, calculates features based on user history
 3. Saves features to the transaction_features table
+4. Exposes metrics on port 9093 for Prometheus scraping
 
 ARCHITECTURE:
 -------------
@@ -18,19 +19,6 @@ ARCHITECTURE:
 │  Kafka   │───▶│ Feature Consumer │───▶│FeatureCalculator│───▶│ PostgreSQL│
 │  topic   │    │   (this file)    │    │                 │    │  features │
 └──────────┘    └──────────────────┘    └─────────────────┘    └───────────┘
-
-WHY A SEPARATE CONSUMER?
-------------------------
-We could calculate features in the same consumer that writes raw_events.
-But having a separate consumer gives us:
-1. Independent scaling (features might be slower than raw writes)
-2. Features can be recalculated by replaying Kafka
-3. Clear separation of concerns
-
-CONSUMER GROUP:
----------------
-This consumer uses group_id "feature-calculator" (different from raw-events-writer).
-This means BOTH consumers receive ALL messages (they're independent).
 
 ================================================================================
 """
@@ -46,9 +34,60 @@ from typing import Any, Dict
 
 from kafka import KafkaConsumer
 
+try:
+    from prometheus_client import Counter, Histogram, Gauge, start_http_server
+except ImportError:
+    raise ImportError("prometheus_client is required. Install with: pip install prometheus-client")
+
 from db import connect_with_retry, upsert_features, ensure_features_table_exists
 from state import StateStore
 from features import FeatureCalculator
+
+
+# ============================================================================
+# PROMETHEUS METRICS
+# ============================================================================
+
+MESSAGES_PROCESSED = Counter(
+    'fraud_feature_consumer_messages_total',
+    'Total messages processed by feature consumer',
+    ['status']
+)
+
+CONSUMER_LAG = Gauge(
+    'fraud_feature_consumer_lag',
+    'Consumer lag (messages behind)',
+    ['partition']
+)
+
+PROCESSING_TIME = Histogram(
+    'fraud_feature_consumer_processing_seconds',
+    'Time to process a single message (feature calculation + DB write)',
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
+)
+
+FEATURE_CALCULATION_TIME = Histogram(
+    'fraud_feature_calculation_seconds',
+    'Time to calculate features only',
+    buckets=[0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1]
+)
+
+DB_WRITE_LATENCY = Histogram(
+    'fraud_feature_consumer_db_write_seconds',
+    'Database write latency for transaction_features',
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
+)
+
+USERS_TRACKED = Gauge(
+    'fraud_feature_consumer_users_tracked',
+    'Number of users currently tracked in state store'
+)
+
+ERROR_COUNT = Counter(
+    'fraud_feature_consumer_errors_total',
+    'Total errors in feature consumer',
+    ['error_type']
+)
 
 
 def setup_logger(level: str) -> None:
@@ -121,6 +160,11 @@ def main() -> None:
     setup_logger(os.getenv("LOG_LEVEL", "INFO"))
     log = logging.getLogger("feature_consumer")
     
+    # Start Prometheus metrics server
+    metrics_port = int(os.getenv("METRICS_PORT", "9093"))
+    log.info(f"Starting metrics server on port {metrics_port}")
+    start_http_server(metrics_port)
+    
     kafka_brokers = os.getenv("KAFKA_BROKERS", "redpanda:9092")
     topic = os.getenv("KAFKA_TOPIC", "transactions")
     
@@ -182,6 +226,8 @@ def main() -> None:
                 if killer.stop:
                     break
                 
+                process_start = time.time()
+                
                 try:
                     event = msg.value
                     txn_data = build_txn_data(msg, event)
@@ -194,7 +240,9 @@ def main() -> None:
                     # ==========================================================
                     # STEP 2: Calculate features based on historical state
                     # ==========================================================
+                    feature_start = time.time()
                     features = calculator.calculate(txn_data, user_state)
+                    FEATURE_CALCULATION_TIME.observe(time.time() - feature_start)
                     
                     # ==========================================================
                     # STEP 3: Add transaction to user's history
@@ -205,16 +253,34 @@ def main() -> None:
                     # ==========================================================
                     # STEP 4: Save features to database
                     # ==========================================================
+                    db_start = time.time()
                     upsert_features(conn, features)
                     conn.commit()
+                    DB_WRITE_LATENCY.observe(time.time() - db_start)
                     
                     processed += 1
+                    MESSAGES_PROCESSED.labels(status='success').inc()
+                    PROCESSING_TIME.observe(time.time() - process_start)
                     
                     # ==========================================================
                     # STEP 5: Commit Kafka offset periodically
                     # ==========================================================
                     if processed % commit_every_n == 0:
                         consumer.commit()
+                        
+                        # Update metrics
+                        USERS_TRACKED.set(state_store.get_user_count())
+                        
+                        # Update lag metrics
+                        try:
+                            partitions = consumer.assignment()
+                            for tp in partitions:
+                                end_offsets = consumer.end_offsets([tp])
+                                current_offset = consumer.position(tp)
+                                lag = end_offsets[tp] - current_offset
+                                CONSUMER_LAG.labels(partition=str(tp.partition)).set(lag)
+                        except Exception:
+                            pass
                         
                         # Log progress
                         now = time.time()
@@ -233,6 +299,8 @@ def main() -> None:
                 except Exception as e:
                     errors += 1
                     conn.rollback()
+                    MESSAGES_PROCESSED.labels(status='error').inc()
+                    ERROR_COUNT.labels(error_type=type(e).__name__).inc()
                     log.exception("Error processing message: %s", e)
                     
                     # Don't commit offset for failed messages
@@ -256,7 +324,7 @@ def main() -> None:
             pass
         
         try:
-            consumer.close(timeout=10)
+            consumer.close()
         except Exception:
             pass
         

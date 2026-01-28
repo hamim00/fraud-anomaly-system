@@ -1,3 +1,11 @@
+"""
+PRODUCER - Transaction Generator with Prometheus Metrics
+=========================================================
+
+Generates synthetic credit card transactions and publishes to Kafka.
+Exposes metrics on port 9091 for Prometheus scraping.
+"""
+
 import json
 import logging
 import os
@@ -9,9 +17,44 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, Tuple
+from threading import Thread
 
 from faker import Faker
 from kafka import KafkaProducer
+from prometheus_client import Counter, Histogram, Gauge, start_http_server
+
+
+# ============================================================================
+# PROMETHEUS METRICS
+# ============================================================================
+
+TRANSACTIONS_PRODUCED = Counter(
+    'fraud_transactions_produced_total',
+    'Total number of transactions produced to Kafka',
+    ['channel', 'country']
+)
+
+TRANSACTIONS_WITH_FRAUD_LABEL = Counter(
+    'fraud_transactions_with_fraud_label_total',
+    'Transactions with fraud label=True',
+)
+
+PRODUCER_ERRORS = Counter(
+    'fraud_producer_errors_total',
+    'Total number of producer errors',
+    ['error_type']
+)
+
+PRODUCER_LATENCY = Histogram(
+    'fraud_producer_send_latency_seconds',
+    'Time to send message to Kafka',
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
+)
+
+PRODUCER_RATE = Gauge(
+    'fraud_producer_rate_per_second',
+    'Configured production rate per second'
+)
 
 
 @dataclass(frozen=True)
@@ -24,6 +67,7 @@ class Config:
     cards_per_user: int
     random_seed: int
     log_level: str
+    metrics_port: int
 
 
 def load_config() -> Config:
@@ -36,6 +80,7 @@ def load_config() -> Config:
         cards_per_user=int(os.getenv("CARDS_PER_USER", "2")),
         random_seed=int(os.getenv("RANDOM_SEED", "42")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
+        metrics_port=int(os.getenv("METRICS_PORT", "9091")),
     )
 
 
@@ -156,6 +201,13 @@ def main() -> None:
     setup_logger(cfg.log_level)
     log = logging.getLogger("producer")
 
+    # Start Prometheus metrics server
+    log.info(f"Starting metrics server on port {cfg.metrics_port}")
+    start_http_server(cfg.metrics_port)
+    
+    # Set rate gauge
+    PRODUCER_RATE.set(cfg.rate_per_sec)
+
     rng = random.Random(cfg.random_seed)
     fake = Faker()
     Faker.seed(cfg.random_seed)
@@ -192,8 +244,24 @@ def main() -> None:
 
     while not killer.stop:
         evt = build_event(fake, rng, user_ids, merchant_ids, user_home, user_cards)
-        future = producer.send(cfg.kafka_topic, key=evt["user_id"], value=evt)
-        future.get(timeout=10)
+        
+        send_start = time.time()
+        try:
+            future = producer.send(cfg.kafka_topic, key=evt["user_id"], value=evt)
+            future.get(timeout=10)
+            
+            # Record metrics
+            send_latency = time.time() - send_start
+            PRODUCER_LATENCY.observe(send_latency)
+            TRANSACTIONS_PRODUCED.labels(channel=evt["channel"], country=evt["country"]).inc()
+            
+            if evt["label"]:
+                TRANSACTIONS_WITH_FRAUD_LABEL.inc()
+                
+        except Exception as e:
+            PRODUCER_ERRORS.labels(error_type=type(e).__name__).inc()
+            log.error(f"Failed to send message: {e}")
+            continue
 
         sent += 1
 

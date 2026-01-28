@@ -1,5 +1,5 @@
 """
-MODEL SERVICE - FastAPI Scoring API
+MODEL SERVICE - FastAPI Scoring API with Prometheus Metrics
 ================================================================================
 
 This is the main API that banks/systems call to score transactions in real-time.
@@ -10,6 +10,7 @@ POST /score          - Score a single transaction
 GET  /health         - Health check
 GET  /alerts         - Get recent alerts
 GET  /alerts/stats   - Get alert statistics
+GET  /metrics        - Prometheus metrics
 
 FLOW:
 -----
@@ -33,8 +34,14 @@ from contextlib import asynccontextmanager
 
 import pandas as pd
 import numpy as np
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Response
 from fastapi.middleware.cors import CORSMiddleware
+
+# Prometheus metrics
+from prometheus_client import (
+    Counter, Gauge, Histogram, Info,
+    generate_latest, CONTENT_TYPE_LATEST
+)
 
 from config import config
 from schemas import (
@@ -59,6 +66,75 @@ log = logging.getLogger("model_service")
 
 
 # ============================================================================
+# PROMETHEUS METRICS
+# ============================================================================
+
+SCORING_REQUESTS = Counter(
+    'fraud_scoring_requests_total',
+    'Total scoring requests received',
+    ['status']
+)
+
+SCORING_DECISIONS = Counter(
+    'fraud_scoring_decisions_total',
+    'Scoring decisions by type',
+    ['decision']
+)
+
+SCORING_LATENCY = Histogram(
+    'fraud_scoring_latency_seconds',
+    'End-to-end scoring latency',
+    buckets=[0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.5, 1.0]
+)
+
+ALERTS_CREATED = Counter(
+    'fraud_alerts_created_total',
+    'Total alerts created',
+    ['decision']
+)
+
+MODEL_LOADED = Gauge(
+    'fraud_model_loaded',
+    'Whether the model is loaded (1) or not (0)'
+)
+
+MODEL_INFO = Info(
+    'fraud_model',
+    'Information about the loaded model'
+)
+
+# Score distribution tracking
+SCORE_MEAN = Gauge(
+    'fraud_scoring_score_mean',
+    'Rolling mean of fraud scores (last 100)'
+)
+
+SCORE_MAX = Gauge(
+    'fraud_scoring_score_max',
+    'Rolling max of fraud scores (last 100)'
+)
+
+
+class RollingScoreTracker:
+    """Track rolling statistics of fraud scores."""
+    
+    def __init__(self, window_size: int = 100):
+        self.window_size = window_size
+        self.scores: list = []
+    
+    def add(self, score: float):
+        self.scores.append(score)
+        if len(self.scores) > self.window_size:
+            self.scores.pop(0)
+        
+        if self.scores:
+            SCORE_MEAN.set(sum(self.scores) / len(self.scores))
+            SCORE_MAX.set(max(self.scores))
+
+score_tracker = RollingScoreTracker()
+
+
+# ============================================================================
 # STARTUP / SHUTDOWN
 # ============================================================================
 
@@ -76,8 +152,14 @@ async def lifespan(app: FastAPI):
     success = model_loader.load()
     if not success:
         log.error("Failed to load model! Service will return errors.")
+        MODEL_LOADED.set(0)
     else:
         log.info("Model loaded successfully!")
+        MODEL_LOADED.set(1)
+        MODEL_INFO.info({
+            'name': model_loader.model_name or 'unknown',
+            'version': model_loader.model_version or 'unknown',
+        })
     
     # Check database
     if check_connection():
@@ -184,6 +266,15 @@ def make_decision(score: float) -> Decision:
 # ENDPOINTS
 # ============================================================================
 
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint."""
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST
+    )
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """
@@ -215,6 +306,7 @@ async def score_transaction(request: ScoreRequest):
     
     # Check if model is loaded
     if not model_loader.is_loaded():
+        SCORING_REQUESTS.labels(status='error').inc()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Model not loaded. Please try again later."
@@ -228,11 +320,20 @@ async def score_transaction(request: ScoreRequest):
         scores = model_loader.predict_proba(features_df)
         score = float(scores[0])
         
+        # Track score for monitoring
+        score_tracker.add(score)
+        
         # Make decision
         decision = make_decision(score)
         
         # Calculate latency
-        latency_ms = int((time.time() - start_time) * 1000)
+        latency_seconds = time.time() - start_time
+        latency_ms = int(latency_seconds * 1000)
+        
+        # Record metrics
+        SCORING_LATENCY.observe(latency_seconds)
+        SCORING_REQUESTS.labels(status='success').inc()
+        SCORING_DECISIONS.labels(decision=decision.value).inc()
         
         # Get explanations
         feature_importances = model_loader.get_feature_importances()
@@ -270,6 +371,9 @@ async def score_transaction(request: ScoreRequest):
                 latency_ms=latency_ms,
             )
             alert_created = alert_id is not None
+            
+            if alert_created:
+                ALERTS_CREATED.labels(decision=decision.value).inc()
         
         # Log
         log.info(
@@ -295,6 +399,7 @@ async def score_transaction(request: ScoreRequest):
         )
         
     except Exception as e:
+        SCORING_REQUESTS.labels(status='error').inc()
         log.exception(f"Error scoring transaction: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -329,6 +434,7 @@ async def root():
             "GET /health": "Health check",
             "GET /alerts": "Get recent alerts",
             "GET /alerts/stats": "Get alert statistics",
+            "GET /metrics": "Prometheus metrics",
             "GET /docs": "OpenAPI documentation",
         }
     }

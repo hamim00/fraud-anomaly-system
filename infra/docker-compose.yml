@@ -1,6 +1,9 @@
 name: fraud-system
 
 services:
+  # ==========================================================================
+  # REDPANDA (Kafka-compatible message broker)
+  # ==========================================================================
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v25.3.5
     container_name: fraud-redpanda
@@ -21,7 +24,7 @@ services:
       - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
     ports:
       - "19092:19092"
-      - "9644:9644"
+      - "9644:9644"  # Redpanda metrics
     volumes:
       - redpanda-data:/var/lib/redpanda/data
     healthcheck:
@@ -30,6 +33,9 @@ services:
       timeout: 3s
       retries: 30
 
+  # ==========================================================================
+  # POSTGRESQL
+  # ==========================================================================
   postgres:
     image: postgres:16.4
     container_name: fraud-postgres
@@ -48,6 +54,9 @@ services:
       timeout: 3s
       retries: 30
 
+  # ==========================================================================
+  # TOPIC INIT
+  # ==========================================================================
   topic-init:
     image: docker.redpanda.com/redpandadata/redpanda:v25.3.5
     container_name: fraud-topic-init
@@ -59,6 +68,9 @@ services:
     entrypoint: ["bash", "-lc", "/scripts/create-topics.sh"]
     restart: "no"
 
+  # ==========================================================================
+  # PRODUCER - Transaction Generator (with metrics)
+  # ==========================================================================
   producer:
     build:
       context: ../services/producer
@@ -75,8 +87,14 @@ services:
       CARDS_PER_USER: "2"
       RANDOM_SEED: "42"
       LOG_LEVEL: "INFO"
+      METRICS_PORT: "9091"
+    ports:
+      - "9091:9091"  # Prometheus metrics
     restart: unless-stopped
 
+  # ==========================================================================
+  # STREAM-CONSUMER - Raw Events Writer (with metrics)
+  # ==========================================================================
   stream-consumer:
     build:
       context: ../services/stream_consumer
@@ -100,10 +118,13 @@ services:
 
       LOG_LEVEL: "INFO"
       BATCH_COMMIT_EVERY_N: "50"
+      METRICS_PORT: "9092"
+    ports:
+      - "9092:9092"  # Prometheus metrics
     restart: unless-stopped
 
   # ==========================================================================
-  # FEATURE-CONSUMER - Calculate features (Milestone 2)
+  # FEATURE-CONSUMER - Calculate features (with metrics)
   # ==========================================================================
   feature-consumer:
     build:
@@ -128,10 +149,13 @@ services:
 
       LOG_LEVEL: "INFO"
       COMMIT_EVERY_N: "50"
+      METRICS_PORT: "9093"
+    ports:
+      - "9093:9093"  # Prometheus metrics
     restart: unless-stopped
 
   # ==========================================================================
-  # MLFLOW - Experiment tracking and model registry (Milestone 3)
+  # MLFLOW - Experiment tracking and model registry
   # ==========================================================================
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.21.3
@@ -157,7 +181,7 @@ services:
       start_period: 30s
 
   # ==========================================================================
-  # TRAINER - Model training service (Milestone 3)
+  # TRAINER - Model training service
   # ==========================================================================
   trainer:
     build:
@@ -186,7 +210,7 @@ services:
       - training
 
   # ==========================================================================
-  # MODEL-SERVICE - Scoring API (Milestone 4)
+  # MODEL-SERVICE - Scoring API (with metrics)
   # ==========================================================================
   model-service:
     build:
@@ -225,7 +249,78 @@ services:
       retries: 5
       start_period: 30s
 
+  # ==========================================================================
+  # PROMETHEUS - Metrics collection (Milestone 5)
+  # ==========================================================================
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: fraud-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================================
+  # GRAFANA - Dashboards and visualization (Milestone 5)
+  # ==========================================================================
+  grafana:
+    image: grafana/grafana:10.4.1
+    container_name: fraud-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - postgres
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================================
+  # POSTGRES EXPORTER - PostgreSQL metrics for Prometheus (Milestone 5)
+  # ==========================================================================
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: fraud-postgres-exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://fraud:fraud@postgres:5432/fraud_db?sslmode=disable"
+    ports:
+      - "9187:9187"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   redpanda-data:
   pg-data:
   mlflow-data:
+  prometheus-data:
+  grafana-data:

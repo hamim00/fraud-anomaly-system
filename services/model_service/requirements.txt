@@ -14,3 +14,6 @@ numpy==2.2.3
 
 # Validation
 pydantic==2.10.0
+
+# Monitoring
+prometheus-client==0.20.0
