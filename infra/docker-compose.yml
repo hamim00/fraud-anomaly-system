@@ -25,11 +25,10 @@ services:
     volumes:
       - redpanda-data:/var/lib/redpanda/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-      start_period: 30s
+      test: ["CMD-SHELL", "rpk cluster info --brokers redpanda:9092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
 
   postgres:
     image: postgres:16.4
@@ -151,16 +150,14 @@ services:
       --backend-store-uri sqlite:///mlflow/mlflow.db
       --default-artifact-root /mlflow/artifacts
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 10s
-      timeout: 5s
-      retries: 5
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   # ==========================================================================
   # TRAINER - Model training service (Milestone 3)
-  # ==========================================================================
-  # This is a ONE-OFF service, not continuously running.
-  # Run manually with: docker compose run trainer
   # ==========================================================================
   trainer:
     build:
@@ -171,6 +168,8 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_started
+    volumes:
+      - mlflow-data:/mlflow
     environment:
       PGHOST: "postgres"
       PGPORT: "5432"
@@ -181,11 +180,50 @@ services:
       MLFLOW_TRACKING_URI: "http://mlflow:5000"
       MLFLOW_EXPERIMENT: "fraud-detection"
       
-      # Promotion thresholds
       MIN_PR_AUC: "0.15"
       MIN_RECALL: "0.30"
     profiles:
-      - training  # Only runs when explicitly requested
+      - training
+
+  # ==========================================================================
+  # MODEL-SERVICE - Scoring API (Milestone 4)
+  # ==========================================================================
+  model-service:
+    build:
+      context: ../services/model_service
+    container_name: fraud-model-service
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    volumes:
+      - mlflow-data:/mlflow
+    environment:
+      PGHOST: "postgres"
+      PGPORT: "5432"
+      PGDATABASE: "fraud_db"
+      PGUSER: "fraud"
+      PGPASSWORD: "fraud"
+      
+      MLFLOW_TRACKING_URI: "http://mlflow:5000"
+      MODEL_NAME: "fraud-detector-xgboost"
+      MODEL_VERSION: "4"
+      
+      THRESHOLD_REVIEW: "0.3"
+      THRESHOLD_BLOCK: "0.7"
+      
+      CREATE_ALERTS: "true"
+      TOP_K_FEATURES: "5"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 volumes:
   redpanda-data:
