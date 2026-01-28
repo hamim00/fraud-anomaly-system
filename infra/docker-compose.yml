@@ -234,7 +234,7 @@ services:
       
       MLFLOW_TRACKING_URI: "http://mlflow:5000"
       MODEL_NAME: "fraud-detector-xgboost"
-      MODEL_VERSION: "4"
+      MODEL_VERSION: "1"
       
       THRESHOLD_REVIEW: "0.3"
       THRESHOLD_BLOCK: "0.7"
